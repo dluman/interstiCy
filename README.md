@@ -2,6 +2,10 @@
 
 A fast Rust implementation of spaCy tokenization with Python bindings.
 
+> [!NOTE]
+> Interested in a fuller implementation of spaCy bindings in rust? Checkout
+> [rusTy](https://www.github.com/dluman/rusTy).
+
 ## Overview
 
 `interstiCy` speeds up spaCy's tokenizer by implementing the tokenization
