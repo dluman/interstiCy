@@ -17,7 +17,7 @@ pub struct Tokenizer {
     single_special_cases: HashMap<String, Vec<SpaCyRuleSpec>>,
     multi_special_cases: TokenSequenceTrie,
     /// Cache for `tokenize_span` results. The key is (span text, use_special_cases).
-    span_cache: Mutex<HashMap<(String, bool), Vec<String>>>,
+    span_cache: Mutex<HashMap<(String, bool), Vec<Token>>>,
 }
 
 impl std::fmt::Debug for Tokenizer {
@@ -147,13 +147,18 @@ impl Tokenizer {
         &self,
         span_text: &str,
         start: usize,
-        end: usize,
+        _end: usize,
         use_special_cases: bool,
         tokens: &mut Vec<Token>,
     ) {
         let span_tokens = self.tokenize_span_cached(span_text, use_special_cases);
-        for token_text in span_tokens {
-            tokens.push(Token::new(start, end, token_text, false));
+        for token in span_tokens {
+            tokens.push(Token::new(
+                token.start + start,
+                token.end + start,
+                token.text,
+                false,
+            ));
         }
     }
 
@@ -188,7 +193,9 @@ impl Tokenizer {
     }
 
     /// Tokenize a single whitespace-free span, with caching.
-    fn tokenize_span_cached(&self, text: &str, use_special_cases: bool) -> Vec<String> {
+    ///
+    /// Offsets in the returned tokens are relative to the start of `text`.
+    fn tokenize_span_cached(&self, text: &str, use_special_cases: bool) -> Vec<Token> {
         let key = (text.to_string(), use_special_cases);
         {
             let cache = self.span_cache.lock().unwrap();
@@ -205,86 +212,109 @@ impl Tokenizer {
     }
 
     /// Tokenize a single whitespace-free span.
-    fn tokenize_span_uncached(&self, text: &str, use_special_cases: bool) -> Vec<String> {
+    ///
+    /// Offsets in the returned tokens are relative to the start of `text`.
+    fn tokenize_span_uncached(&self, text: &str, use_special_cases: bool) -> Vec<Token> {
         if text.is_empty() {
             return Vec::new();
         }
 
-        let mut prefixes: Vec<String> = Vec::new();
-        let mut suffixes: Vec<String> = Vec::new();
-        let mut string = text.to_string();
+        let mut prefixes: Vec<Token> = Vec::new();
+        let mut suffixes: Vec<Token> = Vec::new();
+        let mut current_start: usize = 0;
+        let mut current_end: usize = text.len();
         let mut last_size = 0;
 
-        while !string.is_empty() && string.len() != last_size {
-            if self.matches_token_match(&string) {
+        loop {
+            let remaining_len = current_end.saturating_sub(current_start);
+            if remaining_len == 0 || remaining_len == last_size {
                 break;
             }
-            if use_special_cases && self.single_special_cases.contains_key(&string) {
-                break;
-            }
-            last_size = string.len();
+            last_size = remaining_len;
+            let remaining = &text[current_start..current_end];
 
-            let pre_len = self.find_prefix(&string);
-            let mut prefix = String::new();
-            let mut minus_pre = string.clone();
+            if self.matches_token_match(remaining) {
+                break;
+            }
+            if use_special_cases && self.single_special_cases.contains_key(remaining) {
+                break;
+            }
+
+            let pre_len = self.find_prefix(remaining);
             if pre_len > 0 {
-                prefix = string[..pre_len].to_string();
-                minus_pre = string[pre_len..].to_string();
-                if !minus_pre.is_empty()
-                    && use_special_cases
-                    && self.single_special_cases.contains_key(&minus_pre)
-                {
-                    string = minus_pre;
-                    prefixes.push(prefix);
+                let prefix_text = remaining[..pre_len].to_string();
+                prefixes.push(Token::new(
+                    current_start,
+                    current_start + pre_len,
+                    prefix_text,
+                    false,
+                ));
+                current_start += pre_len;
+                let after_prefix = &text[current_start..current_end];
+                if use_special_cases && self.single_special_cases.contains_key(after_prefix) {
                     break;
                 }
+                continue;
             }
 
-            let suf_len = self.find_suffix(&minus_pre);
-            let mut suffix = String::new();
-            let mut minus_suf = minus_pre.clone();
+            let suf_len = self.find_suffix(remaining);
             if suf_len > 0 {
-                suffix = minus_pre[minus_pre.len() - suf_len..].to_string();
-                minus_suf = minus_pre[..minus_pre.len() - suf_len].to_string();
-                if !minus_suf.is_empty()
-                    && use_special_cases
-                    && self.single_special_cases.contains_key(&minus_suf)
-                {
-                    string = minus_suf;
-                    suffixes.push(suffix);
+                let suffix_start = current_end - suf_len;
+                let suffix_text = text[suffix_start..current_end].to_string();
+                suffixes.push(Token::new(suffix_start, current_end, suffix_text, false));
+                current_end -= suf_len;
+                let after_suffix = &text[current_start..current_end];
+                if use_special_cases && self.single_special_cases.contains_key(after_suffix) {
                     break;
                 }
+                continue;
             }
 
-            if pre_len > 0 && suf_len > 0 && pre_len + suf_len <= string.len() {
-                string = string[pre_len..string.len() - suf_len].to_string();
-                prefixes.push(prefix);
-                suffixes.push(suffix);
-            } else if pre_len > 0 {
-                string = minus_pre;
-                prefixes.push(prefix);
-            } else if suf_len > 0 {
-                string = minus_suf;
-                suffixes.push(suffix);
-            }
+            // No prefix or suffix was found; stop to avoid an infinite loop.
+            break;
         }
 
         let mut result = prefixes;
-        if !string.is_empty() {
+        let remaining = &text[current_start..current_end];
+        if !remaining.is_empty() {
             if use_special_cases {
-                if let Some(specs) = self.single_special_cases.get(&string) {
-                    for spec in specs {
-                        result.push(spec.orth.clone());
+                if let Some(specs) = self.single_special_cases.get(remaining) {
+                    let n = specs.len();
+                    let mut spec_start = current_start;
+                    for (i, spec) in specs.iter().enumerate() {
+                        let is_last = i == n - 1;
+                        let spec_end = if is_last {
+                            current_end
+                        } else {
+                            spec_start + spec.orth.len()
+                        };
+                        result.push(Token::new(
+                            spec_start,
+                            spec_end,
+                            spec.orth.clone(),
+                            false,
+                        ));
+                        spec_start = spec_end;
                     }
-                } else if self.matches_token_match(&string) || self.matches_url_match(&string) {
-                    result.push(string);
+                } else if self.matches_token_match(remaining) || self.matches_url_match(remaining) {
+                    result.push(Token::new(
+                        current_start,
+                        current_end,
+                        remaining.to_string(),
+                        false,
+                    ));
                 } else {
-                    result.extend(self.split_infix(&string));
+                    result.extend(self.split_infix_with_offsets(remaining, current_start));
                 }
-            } else if self.matches_token_match(&string) || self.matches_url_match(&string) {
-                result.push(string);
+            } else if self.matches_token_match(remaining) || self.matches_url_match(remaining) {
+                result.push(Token::new(
+                    current_start,
+                    current_end,
+                    remaining.to_string(),
+                    false,
+                ));
             } else {
-                result.extend(self.split_infix(&string));
+                result.extend(self.split_infix_with_offsets(remaining, current_start));
             }
         }
         result.extend(suffixes.into_iter().rev());
@@ -329,14 +359,24 @@ impl Tokenizer {
                 if *start == i {
                     let (start, end, specs) = filtered_iter.next().unwrap();
                     let final_spacy = tokens[end - 1].has_space_after;
+                    let match_start = tokens[start].start;
+                    let match_end = tokens[end - 1].end;
+                    let n = specs.len();
+                    let mut spec_start = match_start;
                     for (j, spec) in specs.iter().enumerate() {
-                        let is_last = j == specs.len() - 1;
+                        let is_last = j == n - 1;
+                        let spec_end = if is_last {
+                            match_end
+                        } else {
+                            spec_start + spec.orth.len()
+                        };
                         result.push(Token::new(
-                            tokens[start].start,
-                            tokens[end - 1].end,
+                            spec_start,
+                            spec_end,
                             spec.orth.clone(),
                             if is_last { final_spacy } else { false },
                         ));
+                        spec_start = spec_end;
                     }
                     i = end;
                     continue;
@@ -377,7 +417,7 @@ impl Tokenizer {
             .unwrap_or(false)
     }
 
-    fn split_infix(&self, text: &str) -> Vec<String> {
+    fn split_infix_with_offsets(&self, text: &str, base_offset: usize) -> Vec<Token> {
         let mut matches = Vec::new();
         for m in self.infix_re.find_iter(text) {
             match m {
@@ -387,22 +427,42 @@ impl Tokenizer {
         }
 
         if matches.is_empty() {
-            return vec![text.to_string()];
+            return vec![Token::new(
+                base_offset,
+                base_offset + text.len(),
+                text.to_string(),
+                false,
+            )];
         }
 
         let mut result = Vec::new();
         let mut start = 0;
         for m in matches {
             if m.start() != start {
-                result.push(text[start..m.start()].to_string());
+                result.push(Token::new(
+                    base_offset + start,
+                    base_offset + m.start(),
+                    text[start..m.start()].to_string(),
+                    false,
+                ));
             }
             if m.start() != m.end() {
-                result.push(text[m.start()..m.end()].to_string());
+                result.push(Token::new(
+                    base_offset + m.start(),
+                    base_offset + m.end(),
+                    text[m.start()..m.end()].to_string(),
+                    false,
+                ));
             }
             start = m.end();
         }
         if start < text.len() {
-            result.push(text[start..].to_string());
+            result.push(Token::new(
+                base_offset + start,
+                base_offset + text.len(),
+                text[start..].to_string(),
+                false,
+            ));
         }
         result
     }

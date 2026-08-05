@@ -32,6 +32,16 @@ class IntersticyTokenizer:
         """Return token strings (convenience method)."""
         return self._tokenizer.tokenize(text)
 
+    def tokenize_with_spans(self, text: str) -> list[tuple[int, int, str, bool]]:
+        """Return `(start_char, end_char, text, has_space_after)` tuples."""
+        return self._tokenizer.tokenize_with_spans(text)
+
+    def tokenize_with_spans_batch(
+        self, texts: list[str]
+    ) -> list[list[tuple[int, int, str, bool]]]:
+        """Return spans for a list of texts, releasing the GIL and using all cores."""
+        return self._tokenizer.tokenize_with_spans_batch(texts)
+
 
 def create_tokenizer(nlp: Any) -> IntersticyTokenizer:
     """Create an interstiCy tokenizer from a spaCy ``Language`` object.

@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use rayon::prelude::*;
 
 mod rules;
 mod special_cases;
@@ -33,7 +34,7 @@ impl PyTokenizer {
         Ok(list)
     }
 
-    /// Tokenize text and return a list of `(start_char, end_char, text)` tuples.
+    /// Tokenize text and return a list of `(start_char, end_char, text, has_space_after)` tuples.
     fn tokenize_with_spans<'py>(
         &self,
         py: Python<'py>,
@@ -44,9 +45,48 @@ impl PyTokenizer {
             .inner
             .tokenize(text)
             .into_iter()
-            .map(|t| (offset_map[t.start], offset_map[t.end], t.text));
+            .map(|t| (offset_map[t.start], offset_map[t.end], t.text, t.has_space_after));
         let list = PyList::new(py, tokens)?;
         Ok(list)
+    }
+
+    /// Tokenize a list of texts in parallel and return a list of
+    /// `(start_char, end_char, text, has_space_after)` tuples per text.
+    ///
+    /// The GIL is released while the tokenization runs, so other Python threads
+    /// can execute concurrently.
+    fn tokenize_with_spans_batch<'py>(
+        &self,
+        py: Python<'py>,
+        texts: Vec<String>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let results: Vec<Vec<(usize, usize, String, bool)>> = py.detach(|| {
+            texts
+                .par_iter()
+                .map(|text| {
+                    let offset_map = build_byte_to_char_map(text);
+                    self.inner
+                        .tokenize(text)
+                        .into_iter()
+                        .map(|t| {
+                            (
+                                offset_map[t.start],
+                                offset_map[t.end],
+                                t.text,
+                                t.has_space_after,
+                            )
+                        })
+                        .collect()
+                })
+                .collect()
+        });
+
+        let outer = PyList::empty(py);
+        for inner in results {
+            let inner_list = PyList::new(py, inner)?;
+            outer.append(inner_list)?;
+        }
+        Ok(outer)
     }
 
     /// Tokenize text and return a list of `(text, has_space_after)` tuples.

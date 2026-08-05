@@ -46,6 +46,36 @@ def test_tokenize_matches_spacy(nlp, tok, text):
     assert rust_tokens == spacy_tokens, f"Mismatch for: {text!r}"
 
 
+def test_tokenize_with_spans_matches_doc(nlp, tok):
+    text = "Hello, world! I do n't know."
+    spacy_doc = nlp(text)
+    spans = tok.tokenize_with_spans(text)
+    assert len(spans) == len(spacy_doc)
+    for (start, end, token_text, has_space), spacy_token in zip(spans, spacy_doc):
+        assert token_text == spacy_token.text
+        assert start == spacy_token.idx
+        assert end == spacy_token.idx + len(spacy_token.text)
+        assert has_space == (spacy_token.whitespace_ != "")
+
+
+def test_tokenize_with_spans_batch_matches_spacy(nlp, tok):
+    texts = [
+        "Hello, world!",
+        "I don't think e-mail is 100% fun—but it's ok.",
+        "Visit https://example.com for $10.",
+    ]
+    batch = tok.tokenize_with_spans_batch(texts)
+    assert len(batch) == len(texts)
+    for text, spans in zip(texts, batch):
+        spacy_doc = nlp(text)
+        assert len(spans) == len(spacy_doc)
+        for (start, end, token_text, has_space), spacy_token in zip(spans, spacy_doc):
+            assert token_text == spacy_token.text
+            assert start == spacy_token.idx
+            assert end == spacy_token.idx + len(spacy_token.text)
+            assert has_space == (spacy_token.whitespace_ != "")
+
+
 def test_tokenize_with_spaces_matches_doc(nlp, tok):
     text = "Hello, world! I do n't know."
     wrapper = intersticy.IntersticyTokenizer(nlp.vocab, tok)
@@ -59,3 +89,14 @@ def test_create_tokenizer_replacement(nlp):
     nlp.tokenizer = intersticy.create_tokenizer(nlp)
     doc = nlp("Hello, world!")
     assert [t.text for t in doc] == ["Hello", ",", "world", "!"]
+
+
+def test_intersticy_tokenizer_wraps_batch(nlp, tok):
+    wrapper = intersticy.IntersticyTokenizer(nlp.vocab, tok)
+    texts = ["Hello, world!", "Goodbye, world!"]
+    batch = wrapper.tokenize_with_spans_batch(texts)
+    assert len(batch) == 2
+    assert batch[0][0] == (0, 5, "Hello", False)
+    assert batch[0][1] == (5, 6, ",", True)
+    assert batch[0][2] == (7, 12, "world", False)
+    assert batch[0][3] == (12, 13, "!", False)
