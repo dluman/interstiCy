@@ -73,24 +73,21 @@ print([t.text for t in doc])
 
 ## Benchmarks
 
-Benchmarks are measured against `spacy.blank("en")` (the tokenizer only) on the
-same machine and text. End-to-end pipelines such as `en_core_web_sm` spend most
-of their time on tagging, parsing, and NER, so the overall speedup there is much
-smaller than the tokenizer-only figures below.
+All timings are for tokenization only, measured against `spacy.blank("en")` on the
+same machine and text.
 
-| Workload | spaCy | interstiCy | Result |
+| Workload | spaCy | interstiCy | Speedup |
 |---|---|---|---|
-| Repetitive English paragraph (cached, ~200 k chars) | ~218 ms | ~17 ms | **~13x** (cache-heavy) |
-| Real-world prose (Pride and Prejudice, 728 k chars) | ~700 ms | ~60 ms | **~11.8x** tokenizer-only |
-| 128 chunks of ~50 k chars, sequential vs batch | — | — | **~2.2x** batch speedup on 8 cores |
+| Repetitive English paragraph (~200 k chars, cache-heavy) | ~218 ms | ~17 ms | **~13x** |
+| Real-world prose (Pride and Prejudice, 728 k chars) | ~700 ms | ~60 ms | **~11.8x** |
+| 128 chunks of ~50 k chars, batch vs sequential | — | — | **~2.2x on 8 cores** |
 
-> **Note on batch scaling:** The batch APIs release the GIL and use all cores.
-> Replacing the original single-mutex span cache with a **sharded cache** raised
-> the batch speedup from ~1.5x to **~2.2x on 8 cores**. The remaining ceiling is
-> thread-scheduling overhead and the total Rust tokenization work when each chunk
-> is small; larger chunks or fewer documents would improve scaling further.
+Batch APIs release the GIL and run across all cores. Larger chunks generally
+scale better; end-to-end pipelines spend most of their time on tagging, parsing,
+and NER, so the overall speedup there is smaller than the tokenizer-only figures
+above.
 
-Run the standalone benchmark yourself:
+Run the standalone benchmarks yourself:
 
 ```bash
 python benchmarks/benchmark.py
