@@ -19,6 +19,11 @@ languages are added.
 
 ## API
 
+**Default entry points:**
+
+- For spaCy integration: `intersticy.create_tokenizer(nlp)`
+- For direct batch use: `Tokenizer.load_from_spacy().tokenize_with_spans_batch(texts)`
+
 The detailed API is the primary interface:
 
 ```python
