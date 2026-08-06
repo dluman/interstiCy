@@ -51,6 +51,30 @@ impl PyTokenizer {
     }
 
     /// Tokenize a list of texts in parallel and return a list of
+    /// token strings per text.
+    ///
+    /// The GIL is released while the tokenization runs.
+    fn tokenize_batch<'py>(
+        &self,
+        py: Python<'py>,
+        texts: Vec<String>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let results: Vec<Vec<String>> = py.detach(|| {
+            texts
+                .par_iter()
+                .map(|text| self.inner.tokenize_texts(text))
+                .collect()
+        });
+
+        let outer = PyList::empty(py);
+        for inner in results {
+            let inner_list = PyList::new(py, inner)?;
+            outer.append(inner_list)?;
+        }
+        Ok(outer)
+    }
+
+    /// Tokenize a list of texts in parallel and return a list of
     /// `(start_char, end_char, text, has_space_after)` tuples per text.
     ///
     /// The GIL is released while the tokenization runs, so other Python threads
@@ -87,6 +111,59 @@ impl PyTokenizer {
             outer.append(inner_list)?;
         }
         Ok(outer)
+    }
+
+    /// Tokenize a list of texts in parallel and return a list of
+    /// `(start_char, end_char, has_space_after)` tuples per text.
+    ///
+    /// The token text is not returned because the input text already contains
+    /// it; callers can recover the text with `text[start:end]`.  This avoids
+    /// the per-token PyString allocation, but batch scaling is still limited by
+    /// the total Rust tokenization work and thread-scheduling overhead when
+    /// chunks are small.
+    ///
+    /// The GIL is released while the tokenization runs.
+    fn tokenize_with_offsets_batch<'py>(
+        &self,
+        py: Python<'py>,
+        texts: Vec<String>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let results: Vec<Vec<(usize, usize, bool)>> = py.detach(|| {
+            texts
+                .par_iter()
+                .map(|text| {
+                    let offset_map = build_byte_to_char_map(text);
+                    self.inner
+                        .tokenize(text)
+                        .into_iter()
+                        .map(|t| (offset_map[t.start], offset_map[t.end], t.has_space_after))
+                        .collect()
+                })
+                .collect()
+        });
+
+        let outer = PyList::empty(py);
+        for inner in results {
+            let inner_list = PyList::new(py, inner)?;
+            outer.append(inner_list)?;
+        }
+        Ok(outer)
+    }
+
+    /// Tokenize text and return a list of `(start_char, end_char, has_space_after)` tuples.
+    fn tokenize_with_offsets<'py>(
+        &self,
+        py: Python<'py>,
+        text: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let offset_map = build_byte_to_char_map(text);
+        let tokens = self
+            .inner
+            .tokenize(text)
+            .into_iter()
+            .map(|t| (offset_map[t.start], offset_map[t.end], t.has_space_after));
+        let list = PyList::new(py, tokens)?;
+        Ok(list)
     }
 
     /// Tokenize text and return a list of `(text, has_space_after)` tuples.

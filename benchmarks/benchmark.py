@@ -38,8 +38,7 @@ def benchmark(label, func, arg=None, repeat=3):
             result = func(arg)
         t1 = time.perf_counter()
         times.append(t1 - t0)
-    mean = sum(times) / len(times)
-    return mean, result
+    return min(times), result
 
 
 def main():
@@ -85,6 +84,7 @@ def main():
 
     t_seq, _ = benchmark("interstiCy sequential", intersticy_sequential, None)
     t_batch, _ = benchmark("interstiCy batch (GIL-free)", intersticy_batch, None)
+    print(f"  sequential: {t_seq:.4f}s, batch: {t_batch:.4f}s")
     print(f"Batch speedup vs sequential: {t_seq / t_batch:.2f}x")
 
     # Full parity check.

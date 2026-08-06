@@ -3,9 +3,18 @@ use crate::special_cases::TokenSequenceTrie;
 use crate::token::Token;
 use fancy_regex::Regex;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 const SPAN_CACHE_LIMIT: usize = 10_000;
+const N_CACHE_SHARDS: usize = 16;
+
+/// Compute which shard a cache key belongs to.
+fn cache_shard(key: &(String, bool)) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % N_CACHE_SHARDS
+}
 
 /// A spaCy-compatible tokenizer implemented in Rust.
 pub struct Tokenizer {
@@ -16,8 +25,9 @@ pub struct Tokenizer {
     url_match: Option<Regex>,
     single_special_cases: HashMap<String, Vec<SpaCyRuleSpec>>,
     multi_special_cases: TokenSequenceTrie,
-    /// Cache for `tokenize_span` results. The key is (span text, use_special_cases).
-    span_cache: Mutex<HashMap<(String, bool), Vec<Token>>>,
+    /// Sharded cache for `tokenize_span` results. Each shard has its own
+    /// mutex, so concurrent threads rarely contend on the same lock.
+    span_cache: [Mutex<HashMap<(String, bool), Vec<Token>>>; N_CACHE_SHARDS],
 }
 
 impl std::fmt::Debug for Tokenizer {
@@ -64,7 +74,7 @@ impl Tokenizer {
                 .transpose()?,
             single_special_cases: HashMap::new(),
             multi_special_cases: TokenSequenceTrie::new(),
-            span_cache: Mutex::new(HashMap::new()),
+            span_cache: std::array::from_fn(|_| Mutex::new(HashMap::new())),
         };
 
         // Compute single- vs multi-token special cases.
@@ -197,14 +207,15 @@ impl Tokenizer {
     /// Offsets in the returned tokens are relative to the start of `text`.
     fn tokenize_span_cached(&self, text: &str, use_special_cases: bool) -> Vec<Token> {
         let key = (text.to_string(), use_special_cases);
+        let shard = cache_shard(&key);
         {
-            let cache = self.span_cache.lock().unwrap();
+            let cache = self.span_cache[shard].lock().unwrap();
             if let Some(tokens) = cache.get(&key) {
                 return tokens.clone();
             }
         }
         let tokens = self.tokenize_span_uncached(text, use_special_cases);
-        let mut cache = self.span_cache.lock().unwrap();
+        let mut cache = self.span_cache[shard].lock().unwrap();
         if cache.len() < SPAN_CACHE_LIMIT {
             cache.insert(key, tokens.clone());
         }
@@ -330,7 +341,8 @@ impl Tokenizer {
         }
 
         // Sort by length descending, then start ascending.  Prefer longest,
-        // leftmost matches.  Then filter out overlapping matches.
+        // leftmost matches.  Then filter out overlapping matches and matches
+        // that span a whitespace boundary (special cases must not cross spaces).
         matches.sort_by(|a, b| {
             let len_a = a.1 - a.0;
             let len_b = b.1 - b.0;
@@ -341,6 +353,13 @@ impl Tokenizer {
         let mut filtered = Vec::new();
         for (start, end, specs) in matches {
             if seen[start..end].iter().any(|&v| v) {
+                continue;
+            }
+            // A multi-token special case may not span across whitespace.  If
+            // any token in the matched range is followed by a space, the next
+            // token is in a different whitespace-separated span and the match
+            // must not apply across that boundary.
+            if (start..end.saturating_sub(1)).any(|i| tokens[i].has_space_after) {
                 continue;
             }
             for i in start..end {
