@@ -1,6 +1,6 @@
 [package]
 name = "intersticy"
-version = "0.2.0"
+version = "0.2.5"
 edition = "2021"
 authors = ["Douglas Luman <douglas.luman@example.com>"]
 description = "Fast Rust implementation of spaCy tokenization"
